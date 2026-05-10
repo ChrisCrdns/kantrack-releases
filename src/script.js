@@ -2221,7 +2221,7 @@
 
   async function isLaunchAtLoginEnabled() {
     try {
-      return !!(await window.__TAURI__?.core?.invoke('plugin:autostart|is_enabled'));
+      return !!(await window.__TAURI__?.core?.invoke('is_launch_at_login_enabled'));
     } catch (error) {
       return false;
     }
@@ -2230,7 +2230,7 @@
   async function setLaunchAtLogin(enabled) {
     const tauri = window.__TAURI__;
     if (!tauri?.core?.invoke) throw new Error('Tauri unavailable');
-    await tauri.core.invoke(enabled ? 'plugin:autostart|enable' : 'plugin:autostart|disable');
+    await tauri.core.invoke('set_launch_at_login', { enabled });
     syncLaunchAtLoginMenu(enabled);
   }
 

@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "KanTrack",
-  "version": "1.0.85",
-  "identifier": "com.yourname.kantrack",
+  "version": "1.0.92",
+  "identifier": "com.chriscrdns.kantrack",
   "build": {
     "beforeDevCommand": "",
     "beforeBuildCommand": "",
@@ -41,6 +41,7 @@
   },
   "bundle": {
     "active": true,
+    "category": "Productivity",
     "targets": ["app", "dmg"],
     "createUpdaterArtifacts": true,
     "icon": [
@@ -48,7 +49,7 @@
     ],
     "macOS": {
       "frameworks": [],
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "13.0"
     }
   },
   "plugins": {

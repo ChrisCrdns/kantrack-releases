@@ -1,4 +1,10 @@
 use std::{
+    env,
+    ffi::CStr,
+    fs,
+    os::raw::c_char,
+    path::PathBuf,
+    process::Command,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
@@ -6,10 +12,10 @@ use std::{
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    utils::config::Color, ActivationPolicy, LogicalSize, Manager, PhysicalPosition, PhysicalSize,
-    Size, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window, Wry,
+    utils::config::Color,
+    ActivationPolicy, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Size, State,
+    WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window, Wry,
 };
-use tauri_plugin_autostart::ManagerExt;
 
 const MAIN_WINDOW_BACKGROUND: Color = Color(247, 249, 252, 255);
 
@@ -21,16 +27,45 @@ static MAIN_WINDOW_SHOW_PENDING: AtomicBool = AtomicBool::new(false);
 struct StartupMenuItem(CheckMenuItem<Wry>);
 struct AutosizeMenuItem(CheckMenuItem<Wry>);
 
+unsafe extern "C" {
+    fn kantrack_login_item_is_enabled() -> bool;
+    fn kantrack_login_item_set_enabled(enabled: bool) -> *mut c_char;
+    fn kantrack_login_item_free_error(message: *mut c_char);
+}
+
+fn login_item_is_enabled() -> bool {
+    unsafe { kantrack_login_item_is_enabled() }
+}
+
+fn set_login_item_enabled(enabled: bool) -> Result<(), String> {
+    cleanup_legacy_launch_agents();
+
+    let message = unsafe { kantrack_login_item_set_enabled(enabled) };
+    if message.is_null() {
+        return Ok(());
+    }
+
+    let error = unsafe { CStr::from_ptr(message) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { kantrack_login_item_free_error(message) };
+    Err(error)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                show_centered_window(&window);
+            }
+        }))
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
-        ))
         .setup(|app| {
+            let migrated_startup_enabled = migrate_legacy_launch_at_login();
+
             app.set_activation_policy(ActivationPolicy::Accessory);
             app.set_dock_visibility(false);
             if let Some(window) = app.get_webview_window("main") {
@@ -95,7 +130,7 @@ pub fn run() {
             // Build tray menu
             let show_hide =
                 MenuItem::with_id(app, "show_hide", "Show / Hide Board", true, Some("Alt+K"))?;
-            let startup_enabled = app.autolaunch().is_enabled().unwrap_or(false);
+            let startup_enabled = migrated_startup_enabled || login_item_is_enabled();
             let toggle_startup = CheckMenuItem::with_id(
                 app,
                 "toggle_startup",
@@ -155,18 +190,14 @@ pub fn run() {
                         app.exit(0);
                     }
                     "toggle_startup" => {
-                        let autostart = app.autolaunch();
-                        let enabled = !autostart.is_enabled().unwrap_or(false);
-                        if enabled {
-                            let _ = autostart.enable();
-                        } else {
-                            let _ = autostart.disable();
-                        }
-                        STARTUP_MENU_ENABLED.store(enabled, Ordering::SeqCst);
-                        let _ = toggle_startup_item.set_checked(enabled);
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window
-                                .eval(&format!("window.kantrackSetLaunchAtLogin?.({enabled})"));
+                        let enabled = !login_item_is_enabled();
+                        if set_login_item_enabled(enabled).is_ok() {
+                            STARTUP_MENU_ENABLED.store(enabled, Ordering::SeqCst);
+                            let _ = toggle_startup_item.set_checked(enabled);
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window
+                                    .eval(&format!("window.kantrackSetLaunchAtLogin?.({enabled})"));
+                            }
                         }
                     }
                     "toggle_autosize" => {
@@ -234,6 +265,8 @@ pub fn run() {
             show_main_window,
             quit_app,
             mark_main_window_ready,
+            is_launch_at_login_enabled,
+            set_launch_at_login,
             update_main_window_layout,
             sync_startup_menu,
             sync_autosize_menu
@@ -264,6 +297,89 @@ fn quit_app(app: tauri::AppHandle) {
 #[tauri::command]
 fn mark_main_window_ready() {
     MAIN_WINDOW_READY.store(true, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn is_launch_at_login_enabled() -> bool {
+    login_item_is_enabled()
+}
+
+#[tauri::command]
+fn set_launch_at_login(enabled: bool, item: State<'_, StartupMenuItem>) -> Result<(), String> {
+    set_login_item_enabled(enabled)?;
+    STARTUP_MENU_ENABLED.store(enabled, Ordering::SeqCst);
+    let _ = item.0.set_checked(enabled);
+    Ok(())
+}
+
+fn migrate_legacy_launch_at_login() -> bool {
+    if cleanup_legacy_launch_agents() && !login_item_is_enabled() {
+        let _ = set_login_item_enabled(true);
+    }
+
+    login_item_is_enabled()
+}
+
+fn cleanup_legacy_launch_agents() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(home) = env::var_os("HOME") else {
+            return false;
+        };
+
+        let mut removed_legacy_login_item = false;
+        let launch_agents = PathBuf::from(home).join("Library").join("LaunchAgents");
+        for file_name in [
+            "kantrack.plist",
+            "KanTrack.plist",
+            "com.chriscrdns.kantrack.plist",
+        ] {
+            let plist = launch_agents.join(file_name);
+            if !legacy_launch_agent_belongs_to_kantrack(&plist) {
+                continue;
+            }
+
+            let _ = unload_launch_agent(&plist);
+            let _ = fs::remove_file(&plist);
+            removed_legacy_login_item = true;
+        }
+
+        return removed_legacy_login_item;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn legacy_launch_agent_belongs_to_kantrack(plist: &PathBuf) -> bool {
+    let Ok(contents) = fs::read_to_string(plist) else {
+        return false;
+    };
+
+    contents.contains("KanTrack.app")
+        || contents.contains("/kantrack")
+        || contents.contains("<string>kantrack</string>")
+        || contents.contains("<string>KanTrack</string>")
+        || contents.contains("<string>com.chriscrdns.kantrack</string>")
+}
+
+#[cfg(target_os = "macos")]
+fn unload_launch_agent(plist: &PathBuf) -> std::io::Result<()> {
+    let uid = Command::new("id").arg("-u").output()?;
+    let uid = String::from_utf8_lossy(&uid.stdout).trim().to_string();
+    if uid.is_empty() {
+        return Ok(());
+    }
+
+    let _ = Command::new("launchctl")
+        .arg("bootout")
+        .arg(format!("gui/{uid}"))
+        .arg(plist)
+        .output();
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]

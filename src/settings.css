@@ -150,6 +150,13 @@ select:disabled {
   gap: 12px;
 }
 
+.link-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .setting-toggle {
   display: grid;
   grid-template-columns: 34px 1fr;

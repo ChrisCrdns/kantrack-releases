@@ -1,13 +1,13 @@
 {
   "name": "kantrack",
   "private": true,
-  "version": "1.0.85",
+  "version": "1.0.92",
   "type": "module",
   "scripts": {
     "tauri": "tauri",
     "prepare:app-store": "node scripts/create-app-store-version.js",
-    "package:alpha": "./scripts/package-alpha-v1.sh",
-    "package:release": "./scripts/package-alpha-v1.sh",
+    "package:app-store": "./scripts/package-app-store.sh",
+    "package:release": "./scripts/package-release.sh",
     "publish:release": "./scripts/publish-github-release.sh"
   },
   "devDependencies": {

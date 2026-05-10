@@ -6,7 +6,6 @@
   "permissions": [
     "core:default",
     "opener:default",
-    "autostart:default",
     "process:default",
     "updater:default"
   ]

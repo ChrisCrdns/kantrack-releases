@@ -25,8 +25,19 @@ dist-ssr
 release/
 app-store/
 src-tauri/target/
+*.pkg
 *.dmg
 *.zip
 *.tar.gz
 *.sig
 *.app
+
+# Local signing and App Store submission material
+*.provisionprofile
+*.mobileprovision
+*.p12
+*.cer
+*.pem
+*.key
+.env
+.env.*

@@ -61,7 +61,7 @@ fi
 
 echo "Building KanTrack.app..."
 export TAURI_SIGNING_PRIVATE_KEY="$(cat "$UPDATER_KEY_PATH")"
-npm run tauri build -- --bundles app
+npm run tauri -- build --bundles app
 
 echo "Removing quarantine metadata..."
 xattr -cr "$APP"

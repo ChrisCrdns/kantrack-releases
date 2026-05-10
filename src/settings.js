@@ -8,9 +8,13 @@
   const launchLoginInput = document.getElementById('launch-login');
   const checkButton = document.getElementById('check-updates');
   const installButton = document.getElementById('install-update');
+  const privacyButton = document.getElementById('privacy-policy');
+  const supportButton = document.getElementById('support-link');
   const updateStatus = document.getElementById('update-status');
   const appVersion = document.getElementById('app-version');
   const tauri = window.__TAURI__;
+  const PRIVACY_URL = 'https://github.com/ChrisCrdns/kantrack-releases/blob/main/PRIVACY.md';
+  const SUPPORT_URL = 'https://github.com/ChrisCrdns/kantrack-releases/blob/main/SUPPORT.md';
   let availableUpdate = null;
 
   autoUpdateInput.checked = autoUpdate;
@@ -22,7 +26,7 @@
     if (!tauri?.core?.invoke) return;
 
     try {
-      launchLoginInput.checked = await tauri.core.invoke('plugin:autostart|is_enabled');
+      launchLoginInput.checked = await tauri.core.invoke('is_launch_at_login_enabled');
     } catch (error) {}
   }
 
@@ -31,11 +35,7 @@
 
     launchLoginInput.disabled = true;
     try {
-      if (launchLoginInput.checked) {
-        await tauri.core.invoke('plugin:autostart|enable');
-      } else {
-        await tauri.core.invoke('plugin:autostart|disable');
-      }
+      await tauri.core.invoke('set_launch_at_login', { enabled: launchLoginInput.checked });
     } catch (error) {
       launchLoginInput.checked = !launchLoginInput.checked;
     } finally {
@@ -67,6 +67,17 @@
 
   function setInstallVisible(isVisible) {
     installButton.hidden = !isVisible;
+  }
+
+  async function openExternalUrl(url) {
+    if (tauri?.core?.invoke) {
+      try {
+        await tauri.core.invoke('plugin:opener|open_url', { url });
+        return;
+      } catch (error) {}
+    }
+
+    window.open(url, '_blank', 'noopener,noreferrer');
   }
 
   function createProgressChannel() {
@@ -142,6 +153,8 @@
   });
 
   installButton.addEventListener('click', installAvailableUpdate);
+  privacyButton?.addEventListener('click', () => openExternalUrl(PRIVACY_URL));
+  supportButton?.addEventListener('click', () => openExternalUrl(SUPPORT_URL));
   loadAppVersion();
   loadLaunchAtLogin();
 

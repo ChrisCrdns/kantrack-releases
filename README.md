@@ -39,7 +39,7 @@ New installs automatically show a short walkthrough covering the global shortcut
 
 ## Requirements
 
-- macOS 11 or newer.
+- macOS 13 or newer.
 - Node.js and npm.
 - Rust and Cargo.
 - For signed public distribution, Apple Developer signing and notarization credentials are expected outside this repository.
@@ -66,18 +66,20 @@ npm run tauri -- build
 
 ## Release Packaging
 
-KanTrack includes helper scripts for the existing GitHub Releases flow.
+KanTrack maintains one source app and generates the Mac App Store source copy from it. The direct-download app keeps GitHub updater support; both versions use Apple's SMAppService API for Launch at Login.
 
-Create release artifacts:
+Create and publish the direct-download release:
 
 ```bash
-npm run package:release
+npm run package:release && npm run publish:release
 ```
 
-The packaging script writes versioned assets under `release/vX.Y.Z/`. Upload those assets to the KanTrack releases repository, or use the publish helper:
+The packaging script writes versioned assets under `release/vX.Y.Z/` and the publish helper uploads them to the KanTrack releases repository.
+
+Create a Mac App Store/TestFlight package:
 
 ```bash
-npm run publish:release
+npm run package:app-store
 ```
 
 The update endpoint is configured for:
@@ -93,6 +95,14 @@ npm run prepare:app-store
 ```
 
 The generated copy is written to `app-store/KanTrack/` and is ignored by git.
+
+For manual App Store inspection, generate the source copy:
+
+```bash
+npm run prepare:app-store
+```
+
+Launch at Login stays off by default in both versions and only changes when users explicitly opt in from Settings or the tray menu.
 
 ## Project Structure
 

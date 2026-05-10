@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = path.join(root, 'app-store', 'KanTrack');
 const appStoreBundleId = 'com.chriscrdns.kantrack';
+const appStoreTeamId = '9686TQV2VP';
 const privacyUrl = 'https://github.com/ChrisCrdns/kantrack-releases/blob/main/PRIVACY.md';
 const supportUrl = 'https://github.com/ChrisCrdns/kantrack-releases/blob/main/SUPPORT.md';
 
@@ -68,6 +69,7 @@ fs.rmSync(path.join(outDir, 'scripts'), { recursive: true, force: true });
 
 updateJson('package.json', (pkg) => {
   pkg.name = 'kantrack-app-store';
+  delete pkg.dependencies?.['@tauri-apps/plugin-process'];
   delete pkg.dependencies?.['@tauri-apps/plugin-updater'];
   pkg.scripts = {
     tauri: pkg.scripts.tauri,
@@ -77,14 +79,18 @@ updateJson('package.json', (pkg) => {
 updateJson('package-lock.json', (lock) => {
   if (lock.packages?.['']) {
     lock.packages[''].name = 'kantrack-app-store';
+    delete lock.packages[''].dependencies?.['@tauri-apps/plugin-process'];
     delete lock.packages[''].dependencies?.['@tauri-apps/plugin-updater'];
   }
+  delete lock.packages?.['node_modules/@tauri-apps/plugin-process'];
   delete lock.packages?.['node_modules/@tauri-apps/plugin-updater'];
+  delete lock.dependencies?.['@tauri-apps/plugin-process'];
   delete lock.dependencies?.['@tauri-apps/plugin-updater'];
 });
 
 updateJson('src-tauri/tauri.conf.json', (config) => {
   config.identifier = appStoreBundleId;
+  config.bundle.category = 'Productivity';
   delete config.bundle?.createUpdaterArtifacts;
   delete config.plugins?.updater;
   if (config.plugins && Object.keys(config.plugins).length === 0) delete config.plugins;
@@ -96,82 +102,25 @@ updateJson('src-tauri/tauri.conf.json', (config) => {
 });
 
 let cargoToml = read('src-tauri/Cargo.toml');
+cargoToml = cargoToml.replace(/\ntauri-plugin-process = "2"/, '');
 cargoToml = cargoToml.replace(/\n\[target\.'cfg\(not\(any\(target_os = "android", target_os = "ios"\)\)\)'\.dependencies\]\ntauri-plugin-updater = "2"\n?/m, '\n');
-cargoToml = cargoToml.replace(/\ntauri-plugin-autostart = "2"/, '');
-cargoToml = cargoToml.replace('[build-dependencies]\ntauri-build = { version = "2", features = [] }', '[build-dependencies]\ntauri-build = { version = "2", features = [] }\ncc = "1"');
 write('src-tauri/Cargo.toml', cargoToml);
 
 updateJson('src-tauri/capabilities/default.json', (capability) => {
-  capability.permissions = capability.permissions.filter((permission) => !['updater:default', 'autostart:default'].includes(permission));
+  capability.permissions = capability.permissions.filter(
+    (permission) => !['process:default', 'updater:default'].includes(permission)
+  );
 });
 
 let rust = read('src-tauri/src/lib.rs');
-rust = rust.replace('use std::{\n    sync::atomic::{AtomicBool, Ordering},', 'use std::{\n    ffi::CStr,\n    os::raw::c_char,\n    sync::atomic::{AtomicBool, Ordering},');
-rust = rust.replace(/\nuse tauri_plugin_autostart::ManagerExt;\n/, '\n');
+rust = rust.replace(/\n\s*\.plugin\(tauri_plugin_process::init\(\)\)/, '');
 rust = rust.replace(/\n\s*\.plugin\(tauri_plugin_updater::Builder::new\(\)\.build\(\)\)/, '');
-rust = rust.replace(/\n\s*\.plugin\(tauri_plugin_autostart::init\(\n\s*tauri_plugin_autostart::MacosLauncher::LaunchAgent,\n\s*None,\n\s*\)\)/, '');
 rust = rust.replace(/\n\s*let check_updates = MenuItem::with_id\(\n\s*app,\n\s*"check_updates",\n\s*"Check for Updates\.\.\.",\n\s*true,\n\s*None::<&str>,\n\s*\)\?;/, '');
 rust = rust.replace(/\n\s*&check_updates,/, '');
 rust = rust.replace(/\n\s*"check_updates" => \{\n\s*open_settings_window\(app, true\);\n\s*\}/, '');
-rust = rust.replace(/let startup_enabled = app\.autolaunch\(\)\.is_enabled\(\)\.unwrap_or\(false\);/, 'let startup_enabled = login_item_is_enabled();');
-rust = rust.replace(/\n\s*"toggle_startup" => \{\n\s*let autostart = app\.autolaunch\(\);\n\s*let enabled = !autostart\.is_enabled\(\)\.unwrap_or\(false\);\n\s*if enabled \{\n\s*let _ = autostart\.enable\(\);\n\s*\} else \{\n\s*let _ = autostart\.disable\(\);\n\s*\}\n\s*STARTUP_MENU_ENABLED\.store\(enabled, Ordering::SeqCst\);\n\s*let _ = toggle_startup_item\.set_checked\(enabled\);\n\s*if let Some\(window\) = app\.get_webview_window\("main"\) \{\n\s*let _ = window\n\s*\.eval\(&format!\("window\.kantrackSetLaunchAtLogin\?\.\(\{enabled\}\)"\)\);\n\s*\}\n\s*\}/, `
-                    "toggle_startup" => {
-                        let enabled = !login_item_is_enabled();
-                        if set_login_item_enabled(enabled).is_ok() {
-                            STARTUP_MENU_ENABLED.store(enabled, Ordering::SeqCst);
-                            let _ = toggle_startup_item.set_checked(enabled);
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window
-                                    .eval(&format!("window.kantrackSetLaunchAtLogin?.({enabled})"));
-                            }
-                        }
-                    }`);
 rust = rust.replace(/fn open_settings_window\(app: &tauri::AppHandle, check_updates: bool\)/, 'fn open_settings_window(app: &tauri::AppHandle, _check_updates: bool)');
 rust = rust.replace(/\n\s*if check_updates \{\n\s*let _ = window\.eval\("window\.dispatchEvent\(new CustomEvent\('kantrack-check-updates'\)\)"\);\n\s*\}/, '');
 rust = rust.replace(/\n\s*let settings_url = if check_updates \{\n\s*WebviewUrl::App\("settings\.html\?checkUpdates=1"\.into\(\)\)\n\s*\} else \{\n\s*WebviewUrl::App\("settings\.html"\.into\(\)\)\n\s*\};/, '\n    let settings_url = WebviewUrl::App("settings.html".into());');
-rust = rust.replace('struct AutosizeMenuItem(CheckMenuItem<Wry>);', `struct AutosizeMenuItem(CheckMenuItem<Wry>);
-
-unsafe extern "C" {
-    fn kantrack_login_item_is_enabled() -> bool;
-    fn kantrack_login_item_set_enabled(enabled: bool) -> *mut c_char;
-    fn kantrack_login_item_free_error(message: *mut c_char);
-}
-
-fn login_item_is_enabled() -> bool {
-    unsafe { kantrack_login_item_is_enabled() }
-}
-
-fn set_login_item_enabled(enabled: bool) -> Result<(), String> {
-    let message = unsafe { kantrack_login_item_set_enabled(enabled) };
-    if message.is_null() {
-        return Ok(());
-    }
-
-    let error = unsafe { CStr::from_ptr(message) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { kantrack_login_item_free_error(message) };
-    Err(error)
-}`);
-rust = rust.replace('            mark_main_window_ready,\n            update_main_window_layout,', '            mark_main_window_ready,\n            is_launch_at_login_enabled,\n            set_launch_at_login,\n            update_main_window_layout,');
-rust = rust.replace('#[tauri::command]\nfn mark_main_window_ready() {\n    MAIN_WINDOW_READY.store(true, Ordering::SeqCst);\n}\n', `#[tauri::command]
-fn mark_main_window_ready() {
-    MAIN_WINDOW_READY.store(true, Ordering::SeqCst);
-}
-
-#[tauri::command]
-fn is_launch_at_login_enabled() -> bool {
-    login_item_is_enabled()
-}
-
-#[tauri::command]
-fn set_launch_at_login(enabled: bool, item: State<'_, StartupMenuItem>) -> Result<(), String> {
-    set_login_item_enabled(enabled)?;
-    STARTUP_MENU_ENABLED.store(enabled, Ordering::SeqCst);
-    let _ = item.0.set_checked(enabled);
-    Ok(())
-}
-`);
 write('src-tauri/src/lib.rs', rust);
 
 write('src-tauri/build.rs', `fn main() {
@@ -230,6 +179,10 @@ write('src-tauri/Entitlements.plist', `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>com.apple.developer.team-identifier</key>
+  <string>${appStoreTeamId}</string>
+  <key>com.apple.application-identifier</key>
+  <string>${appStoreTeamId}.${appStoreBundleId}</string>
   <key>com.apple.security.app-sandbox</key>
   <true/>
   <key>com.apple.security.files.user-selected.read-write</key>
@@ -242,6 +195,8 @@ write('src-tauri/Info.plist', `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.productivity</string>
   <key>ITSAppUsesNonExemptEncryption</key>
   <false/>
 </dict>
@@ -254,10 +209,11 @@ write('src/index.html', indexHtml);
 
 let settingsHtml = read('src/settings.html');
 settingsHtml = settingsHtml.replace(/\n\s*<section class="settings-section muted">\n\s*<div class="section-copy">\n\s*<h2>Updates<\/h2>[\s\S]*?<\/section>/, '');
+settingsHtml = settingsHtml.replace(
+  /\n\s*<div class="link-actions">/,
+  '\n        <p class="setting-note">Launch at Login is off by default and only changes when you enable it.</p>\n\n        <div class="link-actions">'
+);
 settingsHtml = settingsHtml.replace(/\n\s*<\/div>\n\s*<\/section>\n\s*<\/main>/, `
-        <p class="setting-note">Launch at Login is off by default and only changes when you enable it.</p>
-        <button type="button" id="privacy-policy" class="secondary">Privacy Policy</button>
-        <button type="button" id="support-link" class="secondary">Support</button>
       </div>
     </section>
   </main>`);
@@ -270,14 +226,15 @@ write('src/settings.js', `(() => {
   const supportButton = document.getElementById('support-link');
   const tauri = window.__TAURI__;
 
-  function openUrl(url) {
-    if (tauri?.opener?.openUrl) {
-      tauri.opener.openUrl(url).catch(() => {
-        window.location.href = url;
-      });
-      return;
+  async function openUrl(url) {
+    if (tauri?.core?.invoke) {
+      try {
+        await tauri.core.invoke('plugin:opener|open_url', { url });
+        return;
+      } catch (error) {}
     }
-    window.location.href = url;
+
+    window.open(url, '_blank', 'noopener,noreferrer');
   }
 
   privacyButton?.addEventListener('click', () => openUrl('${privacyUrl}'));
@@ -347,8 +304,6 @@ script = script.replace(/\.onboarding-modal:not\(\[hidden\]\), \.update-modal:no
 script = script.replace(/\.onboarding-card, \.update-card/g, '.onboarding-card');
 script = script.replace(/\n\s*addDivider\(pop\);\n\s*addTitle\(pop, 'Updates'\);[\s\S]*?\n\s*const quitItem = addItem\(pop, 'Quit KanTrack'/, "\n\n      const quitItem = addItem(pop, 'Quit KanTrack'");
 script = script.replace(/\n\s*showAfterUpdateRestartIfNeeded\(\);/, '');
-script = script.replace("window.__TAURI__?.core?.invoke('plugin:autostart|is_enabled')", "window.__TAURI__?.core?.invoke('is_launch_at_login_enabled')");
-script = script.replace("await tauri.core.invoke(enabled ? 'plugin:autostart|enable' : 'plugin:autostart|disable');", "await tauri.core.invoke('set_launch_at_login', { enabled });");
 write('src/script.js', script);
 
 let settingsCss = read('src/settings.css');
