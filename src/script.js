@@ -9,6 +9,7 @@
   const WINDOW_WIDTH_KEY = 'kantrack_window_width';
   const DEFERRED_UPDATE_KEY = 'kantrack_deferred_update_version';
   const LAST_UPDATE_CHECK_KEY = 'kantrack_last_update_check';
+  const UPDATE_RESTART_SHOW_KEY = 'kantrack_show_after_update_restart';
   const FILTERS_KEY = 'kantrack_filters_v1';
   const AUTO_MOVE_COMPLETED_KEY = 'kantrack_auto_move_completed_v1';
   const ONBOARDING_SEEN_KEY = 'kantrack_onboarding_seen_v1';
@@ -73,6 +74,7 @@
           onEvent: progressChannel(),
         });
         setMessage('Update installed. Relaunching...');
+        localStorage.setItem(UPDATE_RESTART_SHOW_KEY, 'true');
         await tauri.core.invoke('plugin:process|restart');
       } catch (error) {
         const message = typeof error === 'string' ? error : error?.message;
@@ -109,6 +111,12 @@
   }
 
   initUpdater();
+
+  function showAfterUpdateRestartIfNeeded() {
+    if (localStorage.getItem(UPDATE_RESTART_SHOW_KEY) !== 'true') return;
+    localStorage.removeItem(UPDATE_RESTART_SHOW_KEY);
+    window.__TAURI__?.core?.invoke?.('show_main_window').catch(() => {});
+  }
 
   async function checkForAvailableUpdate() {
     const tauri = window.__TAURI__;
@@ -307,7 +315,6 @@
     searchQuery: '',
     activeTagFilters: new Set(Array.isArray(savedFilters.activeTagFilters) ? savedFilters.activeTagFilters : []),
     activePrioFilter: savedFilters.activePrioFilter || null,
-    lanePrioritySorts: savedFilters.lanePrioritySorts && typeof savedFilters.lanePrioritySorts === 'object' ? savedFilters.lanePrioritySorts : {},
     sortMode: savedFilters.sortMode || null,
     draggedTaskId: null,
     draggedLaneId: null,
@@ -327,7 +334,13 @@
     autosizeFrame: null,
     layoutInFlight: false,
     pendingLayout: null,
-    lastLayoutSignature: ''
+    lastLayoutSignature: '',
+    layoutAnimationFrame: null,
+    layoutAnimationResolve: null,
+    layoutAnimationToken: 0,
+    windowWidthPersistTimer: null,
+    popoverPositionFrame: null,
+    resizeClassTimer: null
   };
 
   function persist() { Storage.save(state); }
@@ -365,7 +378,6 @@
     writeJson(FILTERS_KEY, {
       sortMode: ui.sortMode,
       activePrioFilter: ui.activePrioFilter,
-      lanePrioritySorts: ui.lanePrioritySorts,
       activeTagFilters: [...ui.activeTagFilters]
     });
   }
@@ -373,7 +385,6 @@
   function resetFilters() {
     ui.sortMode = null;
     ui.activePrioFilter = null;
-    ui.lanePrioritySorts = {};
     ui.activeTagFilters.clear();
     persistFilters();
   }
@@ -436,8 +447,35 @@
     const value = Math.round(Number(width) || 0);
     if (value < MIN_WINDOW_WIDTH) return;
     ui.lastWindowWidth = value;
+  }
+
+  function persistRememberedWindowWidth() {
+    const value = Math.round(Number(ui.lastWindowWidth) || 0);
+    if (value < MIN_WINDOW_WIDTH) return;
     try { localStorage.setItem(WINDOW_WIDTH_KEY, String(value)); }
     catch (error) {}
+  }
+
+  function scheduleWindowWidthPersistence(width = window.innerWidth) {
+    rememberWindowWidth(width);
+    clearTimeout(ui.windowWidthPersistTimer);
+    ui.windowWidthPersistTimer = setTimeout(persistRememberedWindowWidth, 220);
+  }
+
+  function markWindowResizing() {
+    document.body.classList.add('is-window-resizing');
+    clearTimeout(ui.resizeClassTimer);
+    ui.resizeClassTimer = setTimeout(() => {
+      document.body.classList.remove('is-window-resizing');
+    }, 140);
+  }
+
+  function schedulePopoverPosition() {
+    if (ui.popoverPositionFrame) return;
+    ui.popoverPositionFrame = requestAnimationFrame(() => {
+      ui.popoverPositionFrame = null;
+      if (ui.openPopover) positionPopover();
+    });
   }
 
   function laneNaturalHeight(lane) {
@@ -498,7 +536,8 @@
     return {
       minWidth,
       width: preferredWidth ? Math.max(minWidth, preferredWidth) : null,
-      height: ui.autosize ? desiredWindowHeight() : null
+      height: ui.autosize ? desiredWindowHeight() : null,
+      animate: options.animate !== false
     };
   }
 
@@ -510,6 +549,62 @@
     ].join(':');
   }
 
+  function cancelLayoutAnimation() {
+    ui.layoutAnimationToken += 1;
+    if (ui.layoutAnimationFrame) cancelAnimationFrame(ui.layoutAnimationFrame);
+    ui.layoutAnimationFrame = null;
+    if (ui.layoutAnimationResolve) ui.layoutAnimationResolve(false);
+    ui.layoutAnimationResolve = null;
+  }
+
+  function easeOutCubic(t) {
+    return 1 - Math.pow(1 - t, 3);
+  }
+
+  function invokeWindowLayout(tauri, layout) {
+    return tauri.core.invoke('update_main_window_layout', { layout });
+  }
+
+  function animateWindowLayout(tauri, targetLayout, signature) {
+    const targetHeight = Number(targetLayout.height);
+    const startHeight = Math.round(window.innerHeight || targetHeight);
+    const delta = targetHeight - startHeight;
+    if (!Number.isFinite(targetHeight) || Math.abs(delta) < 8) {
+      return invokeWindowLayout(tauri, targetLayout).then(() => true).catch(() => false);
+    }
+
+    cancelLayoutAnimation();
+    const token = ui.layoutAnimationToken;
+    const duration = delta > 0 ? 170 : 190;
+    const startedAt = performance.now();
+
+    return new Promise(resolve => {
+      ui.layoutAnimationResolve = resolve;
+      const step = async now => {
+        if (token !== ui.layoutAnimationToken) return;
+
+        const progress = Math.min(1, Math.max(0, (now - startedAt) / duration));
+        const height = Math.round(startHeight + delta * easeOutCubic(progress));
+        try {
+          await invokeWindowLayout(tauri, { ...targetLayout, height, animate: false });
+        } catch (error) {}
+
+        if (token !== ui.layoutAnimationToken) return;
+        if (progress < 1) {
+          ui.layoutAnimationFrame = requestAnimationFrame(step);
+          return;
+        }
+
+        ui.layoutAnimationFrame = null;
+        ui.layoutAnimationResolve = null;
+        ui.lastLayoutSignature = signature;
+        resolve(true);
+      };
+
+      ui.layoutAnimationFrame = requestAnimationFrame(step);
+    });
+  }
+
   async function applyWindowLayout(options = {}) {
     const tauri = window.__TAURI__;
     if (!tauri?.core?.invoke) return;
@@ -517,15 +612,23 @@
     const signature = layoutSignature(layout);
     if (signature === ui.lastLayoutSignature && !options.force) return;
     ui.pendingLayout = { layout, signature };
-    if (ui.layoutInFlight) return;
+    if (ui.layoutInFlight) {
+      cancelLayoutAnimation();
+      return;
+    }
 
     ui.layoutInFlight = true;
     while (ui.pendingLayout) {
       const next = ui.pendingLayout;
       ui.pendingLayout = null;
       try {
-        await tauri.core.invoke('update_main_window_layout', { layout: next.layout });
-        ui.lastLayoutSignature = next.signature;
+        if (next.layout.animate && next.layout.height !== null) {
+          await animateWindowLayout(tauri, next.layout, next.signature);
+        } else {
+          cancelLayoutAnimation();
+          await invokeWindowLayout(tauri, next.layout);
+          ui.lastLayoutSignature = next.signature;
+        }
       } catch (error) {}
     }
     ui.layoutInFlight = false;
@@ -548,7 +651,7 @@
     clearTimeout(ui.autosizeTimer);
     if (ui.autosizeFrame) cancelAnimationFrame(ui.autosizeFrame);
     ui.autosizeFrame = null;
-    applyWindowLayout({ force: true });
+    applyWindowLayout({ force: true, animate: false });
   };
 
   window.kantrackRestoreSelection = () => {
@@ -589,6 +692,7 @@
     searchInput: document.getElementById('search-input'),
     searchClear: document.getElementById('search-clear'),
     searchWrap: document.querySelector('.search-wrap'),
+    topbar: document.querySelector('.topbar'),
     filterBtn: document.getElementById('filter-btn'),
     infoBtn: document.getElementById('info-btn'),
     settingsBtn: document.getElementById('settings-btn'),
@@ -679,13 +783,12 @@
 
   function sortTasks(list, lane) {
     const copy = [...list];
-    const lanePrioritySort = lane ? ui.lanePrioritySorts[lane.id] : null;
     const boardPrioritySort = ui.sortMode === 'priority-low'
       ? 'low'
       : ui.sortMode === 'priority-high' || ui.sortMode === 'priority'
         ? 'high'
         : null;
-    const prioritySort = lanePrioritySort || boardPrioritySort;
+    const prioritySort = boardPrioritySort;
     if (prioritySort) {
       const rank = prioritySort === 'low'
         ? { low: 0, medium: 1, high: 2 }
@@ -770,6 +873,7 @@
     document.querySelectorAll('.lane').forEach(laneEl => {
       const isActive = ui.activeLaneId && laneEl.dataset.lane === ui.activeLaneId;
       laneEl.classList.toggle('is-active-lane', Boolean(isActive));
+      laneEl.classList.toggle('is-lane-focused', Boolean(isActive && !selectedId));
       laneEl.tabIndex = (isActive && !selectedId) ? 0 : -1;
     });
 
@@ -818,6 +922,18 @@
     syncSelectionDom({ focus: false });
     const laneEl = ui.activeLaneId ? document.querySelector(`.lane[data-lane="${ui.activeLaneId}"]`) : null;
     if (laneEl) laneEl.focus({ preventScroll: true });
+  }
+
+  function clearKeyboardFocus() {
+    ui.focusedTaskId = null;
+    ui.activeLaneId = null;
+    syncSelectionDom({ focus: false });
+    if (
+      document.activeElement?.classList?.contains('task') ||
+      document.activeElement?.classList?.contains('lane')
+    ) {
+      document.activeElement.blur();
+    }
   }
 
   function taskCanCompact(task) {
@@ -894,7 +1010,7 @@
     if (task.prio) taskEl.dataset.prio = task.prio;
     else taskEl.removeAttribute('data-prio');
     persist();
-    if (ui.activePrioFilter || Object.keys(ui.lanePrioritySorts).length > 0 || ui.sortMode === 'priority-high' || ui.sortMode === 'priority-low' || ui.sortMode === 'priority') {
+    if (ui.activePrioFilter || ui.sortMode === 'priority-high' || ui.sortMode === 'priority-low' || ui.sortMode === 'priority') {
       render();
     }
   }
@@ -967,13 +1083,6 @@
     if (ui.activePrioFilter) {
       chips.push({ label: `prio: ${ui.activePrioFilter}`, onRemove: () => { ui.activePrioFilter = null; render(); } });
     }
-    Object.entries(ui.lanePrioritySorts).forEach(([laneId, mode]) => {
-      const lane = state.lanes.find(l => l.id === laneId);
-      chips.push({
-        label: `${lane ? lane.name : 'Lane'}: ${mode === 'low' ? 'Low first' : 'High first'}`,
-        onRemove: () => { delete ui.lanePrioritySorts[laneId]; render(); }
-      });
-    });
     ui.activeTagFilters.forEach(tag => {
       chips.push({
         label: `#${tag}`,
@@ -1014,7 +1123,6 @@
     clearAll.onclick = () => {
       ui.sortMode = null;
       ui.activePrioFilter = null;
-      ui.lanePrioritySorts = {};
       ui.activeTagFilters.clear();
       render();
     };
@@ -1417,10 +1525,8 @@
       const btn = document.createElement('button');
       btn.className = 'toast-action';
       btn.textContent = actionLabel;
-      btn.onclick = () => {
-        onAction();
-        dismissToast(toast);
-      };
+      toast._action = onAction;
+      btn.onclick = () => runToastAction(toast);
       toast.appendChild(btn);
     }
     const close = document.createElement('span');
@@ -1436,9 +1542,23 @@
     toast._timeout = setTimeout(() => dismissToast(toast), UNDO_TIMEOUT_MS);
   }
 
+  function runToastAction(toast) {
+    if (!toast || !toast.parentNode || typeof toast._action !== 'function') return false;
+    const action = toast._action;
+    toast._action = null;
+    action();
+    dismissToast(toast);
+    return true;
+  }
+
+  function undoLastAction() {
+    return runToastAction(activeToast);
+  }
+
   function dismissToast(toast, immediate) {
     if (!toast || !toast.parentNode) return;
     if (toast._timeout) clearTimeout(toast._timeout);
+    toast._action = null;
     if (immediate) {
       toast.remove();
     } else {
@@ -1539,6 +1659,7 @@
   function startEditTask(textEl, task, options = {}) {
     const taskEl = textEl.closest('.task');
     const doneBtn = taskEl?.querySelector('.task-done-btn');
+    let finished = false;
     if (taskEl) taskEl.classList.add('is-editing');
     if (doneBtn) doneBtn.style.display = 'none';
 
@@ -1553,39 +1674,72 @@
     sel.removeAllRanges();
     sel.addRange(range);
 
-    const finish = () => {
+    const finish = ({ cancelDraft = false } = {}) => {
+      if (finished) return;
+      finished = true;
+      textEl.removeEventListener('blur', onBlur);
+      textEl.removeEventListener('keydown', onKey);
+      textEl.removeEventListener('input', onInput);
       textEl.contentEditable = 'false';
       textEl.style.cursor = '';
       if (taskEl) taskEl.classList.remove('is-editing');
       if (doneBtn) doneBtn.style.display = '';
       const newText = textEl.innerText.replace(/\u00a0/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+
+      if (cancelDraft && task.draft) {
+        state.tasks = state.tasks.filter(t => t.id !== task.id);
+        if (ui.focusedTaskId === task.id) ui.focusedTaskId = null;
+        ui.activeLaneId = task.laneId;
+        renderAndPersist();
+        requestAnimationFrame(() => focusLane(task.laneId));
+        return;
+      }
+
       if (newText === '') {
         state.tasks = state.tasks.filter(t => t.id !== task.id);
         if (ui.focusedTaskId === task.id) ui.focusedTaskId = null;
+        ui.activeLaneId = task.laneId;
       } else {
         task.text = newText;
+        const wasDraft = Boolean(task.draft);
         delete task.draft;
         const parsed = parseTags(newText);
         if (parsed.length > 0) task.tags = [...new Set([...(task.tags || []), ...parsed])];
         ui.focusedTaskId = task.id;
         ui.activeLaneId = task.laneId;
+        if (wasDraft && parsed.length === 0 && taskEl && taskCanCompact(task)) {
+          textEl.textContent = task.text;
+          taskEl.classList.remove('is-draft');
+          taskEl.classList.toggle('is-compact', taskCanCompact(task));
+          taskEl.classList.toggle('has-no-meta', !taskHasMeta(task));
+          persist();
+          syncSelectionDom({ focus: true });
+          return;
+        }
       }
       renderAndPersist();
-      textEl.removeEventListener('blur', finish);
-      textEl.removeEventListener('keydown', onKey);
-      textEl.removeEventListener('input', onInput);
     };
+    const onBlur = () => finish();
     const onInput = () => syncWindowLayoutSoon();
     const onKey = e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); textEl.blur(); }
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        finish();
+      }
       else if (e.key === 'Enter' && e.shiftKey) {
         e.preventDefault();
+        e.stopPropagation();
         insertTaskLineBreak();
         syncWindowLayoutSoon();
       }
-      else if (e.key === 'Escape') { e.preventDefault(); textEl.blur(); }
+      else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        finish({ cancelDraft: true });
+      }
     };
-    textEl.addEventListener('blur', finish);
+    textEl.addEventListener('blur', onBlur);
     textEl.addEventListener('keydown', onKey);
     textEl.addEventListener('input', onInput);
   }
@@ -1764,12 +1918,13 @@
     const pop = ui.openPopover;
     const anchorRect = ui.openPopoverAnchor.getBoundingClientRect();
     const popRect = pop.getBoundingClientRect();
-    let top = anchorRect.bottom + 4;
+    const preferBelow = Boolean(ui.openPopoverAnchor.closest('.topbar-actions'));
+    let top = anchorRect.bottom + (preferBelow ? 8 : 4);
     let left = anchorRect.left;
     const margin = 8;
     if (left + popRect.width > window.innerWidth - margin) left = window.innerWidth - popRect.width - margin;
     if (left < margin) left = margin;
-    if (top + popRect.height > window.innerHeight - margin) {
+    if (!preferBelow && top + popRect.height > window.innerHeight - margin) {
       const flipped = anchorRect.top - popRect.height - 4;
       if (flipped >= margin) top = flipped;
       else top = Math.max(margin, window.innerHeight - popRect.height - margin);
@@ -1787,19 +1942,102 @@
     return item;
   }
 
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function button(className, text, onClick) {
+    const node = el('button', className, text);
+    node.type = 'button';
+    if (onClick) node.addEventListener('click', onClick);
+    return node;
+  }
+
+  function option(value, text) {
+    const node = document.createElement('option');
+    node.value = value;
+    node.textContent = text;
+    return node;
+  }
+
+  function addTitle(pop, text) {
+    const title = el('div', 'popover-title', text);
+    pop.appendChild(title);
+    return title;
+  }
+
   function divider() {
-    const d = document.createElement('div');
-    d.className = 'popover-divider';
-    return d;
+    return el('div', 'popover-divider');
+  }
+
+  function addDivider(pop) {
+    pop.appendChild(divider());
+  }
+
+  function setItemActive(item, active) {
+    appendCheck(item, active);
+    return item;
+  }
+
+  function addColorRow(pop, colors, activeColor, onSelect) {
+    const colorRow = el('div', 'popover-color-row');
+    colors.forEach(color => {
+      const dot = el('div', 'color-dot' + (activeColor === color ? ' is-active' : ''));
+      dot.dataset.color = color;
+      dot.title = color === 'none' ? 'No color' : color;
+      dot.onclick = () => onSelect(color);
+      colorRow.appendChild(dot);
+    });
+    pop.appendChild(colorRow);
+    return colorRow;
+  }
+
+  function addShortcutRows(pop, rows) {
+    const shortcuts = el('div', 'popover-shortcuts');
+    rows.forEach(([label, key]) => {
+      const row = el('div', 'sc-row');
+      row.appendChild(el('span', '', label));
+      row.appendChild(el('kbd', '', key));
+      shortcuts.appendChild(row);
+    });
+    pop.appendChild(shortcuts);
+    return shortcuts;
+  }
+
+  function addInlineButtonRow(pop, className, actions) {
+    const row = el('div', `popover-inline-row ${className}`);
+    actions.forEach(action => {
+      row.appendChild(button(action.className || 'popover-inline-action', action.label, action.onClick));
+    });
+    pop.appendChild(row);
+    return row;
+  }
+
+  function showInlineConfirm(afterEl, message, confirmLabel, onConfirm) {
+    const confirm = el('div', 'popover-confirm');
+    const actions = el('div', 'popover-confirm-actions');
+    const cancel = button('popover-confirm-button', 'Cancel', () => {
+      confirm.remove();
+      afterEl.hidden = false;
+      positionPopover();
+    });
+    const confirmButton = button('popover-confirm-button danger', confirmLabel, onConfirm);
+    actions.appendChild(cancel);
+    actions.appendChild(confirmButton);
+    confirm.appendChild(el('div', 'popover-confirm-message', message));
+    confirm.appendChild(actions);
+    afterEl.after(confirm);
+    positionPopover();
+    return confirm;
   }
 
   function openTagEditor(anchorEl, tag) {
     showPopover(anchorEl, pop => {
       pop.classList.add('tag-editor-popover');
-      const title = document.createElement('div');
-      title.className = 'popover-title';
-      title.textContent = 'Tag';
-      pop.appendChild(title);
+      addTitle(pop, 'Tag');
 
       const input = document.createElement('input');
       input.className = 'tag-editor-input';
@@ -1808,22 +2046,12 @@
       input.addEventListener('mousedown', e => e.stopPropagation());
       pop.appendChild(input);
 
-      const colorRow = document.createElement('div');
-      colorRow.className = 'popover-color-row';
-      TAG_COLORS.forEach(color => {
-        const dot = document.createElement('div');
-        dot.className = 'color-dot' + (tagColor(tag) === color ? ' is-active' : '');
-        dot.dataset.color = color;
-        dot.title = color === 'none' ? 'No color' : color;
-        dot.onclick = () => {
+      addColorRow(pop, TAG_COLORS, tagColor(tag), color => {
           state.tagColors[tag] = color;
           if (color === 'none') delete state.tagColors[tag];
           renderAndPersist();
           closePopover();
-        };
-        colorRow.appendChild(dot);
       });
-      pop.appendChild(colorRow);
 
       const save = () => {
         const nextTag = normalizeTagName(input.value);
@@ -1836,7 +2064,7 @@
         closePopover();
       };
 
-      pop.appendChild(divider());
+      addDivider(pop);
       addItem(pop, 'Save tag', save);
       input.addEventListener('keydown', e => {
         if (e.key === 'Enter') { e.preventDefault(); save(); }
@@ -1850,66 +2078,26 @@
   }
 
   function openLaneMenu(anchorEl, lane) {
-    const idx = laneIndexOf(lane.id);
     showPopover(anchorEl, pop => {
-      const t = document.createElement('div');
-      t.className = 'popover-title';
-      t.textContent = 'Lane';
-      pop.appendChild(t);
+      addTitle(pop, 'Lane');
 
       addItem(pop, '✎  Rename', () => {
         closePopover();
         const titleEl = document.querySelector(`.lane[data-lane="${lane.id}"] .lane-title`);
-        const headerEl = document.querySelector(`.lane[data-lane="${lane.id}"] .lane-header`);
         if (titleEl) {
           startEditLaneTitle(titleEl, lane);
         }
       });
 
-      const colorRow = document.createElement('div');
-      colorRow.className = 'popover-color-row';
-      LANE_COLORS.forEach(c => {
-        const dot = document.createElement('div');
-        dot.className = 'color-dot' + (lane.color === c ? ' is-active' : '');
-        dot.dataset.color = c;
-        dot.onclick = () => { lane.color = c; renderAndPersist(); closePopover(); };
-        colorRow.appendChild(dot);
-      });
-      pop.appendChild(colorRow);
-      pop.appendChild(divider());
-
-      if (idx > 0) addItem(pop, '←  Move left', () => { moveLane(lane.id, -1); closePopover(); });
-      if (idx < state.lanes.length - 1) addItem(pop, '→  Move right', () => { moveLane(lane.id, +1); closePopover(); });
-
-      const taskCount = state.tasks.filter(t => t.laneId === lane.id).length;
-      pop.appendChild(divider());
-      const filterTitle = document.createElement('div');
-      filterTitle.className = 'popover-title';
-      filterTitle.textContent = 'Filter';
-      pop.appendChild(filterTitle);
-      const currentPrioritySort = ui.lanePrioritySorts[lane.id] || null;
-      const priorityLabelText = currentPrioritySort === 'high'
-        ? 'Priority: high first'
-        : currentPrioritySort === 'low'
-          ? 'Priority: low first'
-          : 'Priority';
-      const priorityItem = addItem(pop, priorityLabelText, () => {
-        if (!currentPrioritySort) ui.lanePrioritySorts[lane.id] = 'high';
-        else if (currentPrioritySort === 'high') ui.lanePrioritySorts[lane.id] = 'low';
-        else delete ui.lanePrioritySorts[lane.id];
-        render();
+      addColorRow(pop, LANE_COLORS, lane.color, color => {
+        lane.color = color;
+        renderAndPersist();
         closePopover();
       });
-      if (currentPrioritySort) {
-        priorityItem.classList.add('is-active');
-        const c = document.createElement('span');
-        c.className = 'check';
-        c.textContent = '✓';
-        priorityItem.appendChild(c);
-      }
+      addDivider(pop);
 
+      const taskCount = state.tasks.filter(t => t.laneId === lane.id).length;
       if (taskCount > 0) {
-        pop.appendChild(divider());
         addItem(pop, `🗑  Clear ${taskCount} task${taskCount === 1 ? '' : 's'}`, () => {
           clearDoneTasks(lane.id);
           closePopover();
@@ -1917,7 +2105,7 @@
       }
 
       if (state.lanes.length > 1) {
-        pop.appendChild(divider());
+        addDivider(pop);
         addItem(pop, '🗑  Delete lane', () => {
           deleteLane(lane.id);
           closePopover();
@@ -1983,6 +2171,7 @@
       localStorage.setItem(ONBOARDING_SEEN_KEY, 'true');
       modal.remove();
       restoreSelection({ focus: true });
+      syncWindowLayoutSoon();
     };
 
     modal.querySelector('.secondary').addEventListener('click', close);
@@ -2013,37 +2202,20 @@
         closePopover();
         showOnboarding();
       });
-      pop.appendChild(divider());
-
-      const t = document.createElement('div');
-      t.className = 'popover-title';
-      t.textContent = 'Shortcuts';
-      pop.appendChild(t);
-
-      const shortcuts = document.createElement('div');
-      shortcuts.className = 'popover-shortcuts';
-      const sc = [
+      addDivider(pop);
+      addTitle(pop, 'Shortcuts');
+      addShortcutRows(pop, [
         ['Show / hide', '⌥K'],
         ['Search', '/'],
         ['New task', 'A or +'],
-        ['Add lane', '⌘L'],
         ['Open task', 'Enter'],
         ['Complete task', 'Space'],
         ['Navigate', '↑ ↓ ← →'],
         ['Move task', '⌘← ⌘→'],
         ['Priority', '⌘↑ ⌘↓'],
-        ['Delete task', 'Delete'],
-        ['Line break', '⇧↵']
-      ];
-      sc.forEach(([label, key]) => {
-        const row = document.createElement('div');
-        row.className = 'sc-row';
-        const l = document.createElement('span'); l.textContent = label;
-        const k = document.createElement('kbd'); k.textContent = key;
-        row.appendChild(l); row.appendChild(k);
-        shortcuts.appendChild(row);
-      });
-      pop.appendChild(shortcuts);
+        ['Delete task', 'Delete or ⌘⌫'],
+        ['Undo delete', '⌘Z']
+      ]);
     });
   }
 
@@ -2111,10 +2283,7 @@
         closePopover();
       };
 
-      const t = document.createElement('div');
-      t.className = 'popover-title';
-      t.textContent = 'General';
-      pop.appendChild(t);
+      addTitle(pop, 'General');
 
       const autosizeItem = addItem(pop, 'Autosize window', () => {
         setAutosize(!ui.autosize);
@@ -2133,21 +2302,13 @@
       });
       isLaunchAtLoginEnabled().then(enabled => appendCheck(launchItem, enabled));
 
-      pop.appendChild(divider());
-      const taskTitle = document.createElement('div');
-      taskTitle.className = 'popover-title';
-      taskTitle.textContent = 'Tasks';
-      pop.appendChild(taskTitle);
+      addDivider(pop);
+      addTitle(pop, 'Tasks');
 
       loadAutoMoveCompleted();
-      const completedRow = document.createElement('div');
-      completedRow.className = 'popover-inline-row completed-move-row';
-      const moveCompletedItem = document.createElement('button');
-      moveCompletedItem.type = 'button';
-      moveCompletedItem.className = 'popover-inline-toggle';
-      const moveCompletedLabel = document.createElement('span');
-      moveCompletedLabel.textContent = 'Move completed';
-      moveCompletedItem.appendChild(moveCompletedLabel);
+      const completedRow = el('div', 'popover-inline-row completed-move-row');
+      const moveCompletedItem = button('popover-inline-toggle');
+      moveCompletedItem.appendChild(el('span', '', 'Move Complete'));
       const destinationSelect = document.createElement('select');
       destinationSelect.className = 'popover-select';
 
@@ -2163,12 +2324,7 @@
         syncMoveCompletedRow();
       });
 
-      state.lanes.forEach(lane => {
-        const option = document.createElement('option');
-        option.value = lane.id;
-        option.textContent = lane.name;
-        destinationSelect.appendChild(option);
-      });
+      state.lanes.forEach(lane => destinationSelect.appendChild(option(lane.id, lane.name)));
       destinationSelect.value = autoMoveCompleted.laneId || fallbackCompletedLaneId() || '';
       destinationSelect.disabled = !autoMoveCompleted.enabled || state.lanes.length === 0;
       destinationSelect.addEventListener('mousedown', e => e.stopPropagation());
@@ -2183,72 +2339,26 @@
       completedRow.appendChild(destinationSelect);
       pop.appendChild(completedRow);
 
-      pop.appendChild(divider());
-      const dataTitle = document.createElement('div');
-      dataTitle.className = 'popover-title';
-      dataTitle.textContent = 'Data';
-      pop.appendChild(dataTitle);
-      const dataRow = document.createElement('div');
-      dataRow.className = 'popover-inline-row data-actions-row';
-      const exportButton = document.createElement('button');
-      exportButton.type = 'button';
-      exportButton.className = 'popover-inline-action';
-      exportButton.textContent = 'Export JSON';
-      exportButton.addEventListener('click', exportBoard);
-      const importButton = document.createElement('button');
-      importButton.type = 'button';
-      importButton.className = 'popover-inline-action';
-      importButton.textContent = 'Import JSON';
-      importButton.addEventListener('click', importBoard);
-      dataRow.appendChild(exportButton);
-      dataRow.appendChild(importButton);
-      pop.appendChild(dataRow);
+      addDivider(pop);
+      addTitle(pop, 'Data');
+      addInlineButtonRow(pop, 'data-actions-row', [
+        { label: 'Export JSON', onClick: exportBoard },
+        { label: 'Import JSON', onClick: importBoard }
+      ]);
 
-      pop.appendChild(divider());
+      addDivider(pop);
       const resetItem = addItem(pop, 'Reset board', () => {
         resetItem.hidden = true;
-        const confirm = document.createElement('div');
-        confirm.className = 'popover-confirm';
-        const msg = document.createElement('div');
-        msg.className = 'popover-confirm-message';
-        msg.textContent = 'Reset board to the default setup?';
-        const actions = document.createElement('div');
-        actions.className = 'popover-confirm-actions';
-
-        const cancel = document.createElement('button');
-        cancel.type = 'button';
-        cancel.className = 'popover-confirm-button';
-        cancel.textContent = 'Cancel';
-        cancel.onclick = () => {
-          confirm.remove();
-          resetItem.hidden = false;
-          positionPopover();
-        };
-
-        const reset = document.createElement('button');
-        reset.type = 'button';
-        reset.className = 'popover-confirm-button danger';
-        reset.textContent = 'Reset';
-        reset.onclick = () => {
+        showInlineConfirm(resetItem, 'Reset board to the default setup?', 'Reset', () => {
           resetBoardToDefault();
           closePopover();
           showToast('Board reset to default.');
-        };
-
-        actions.appendChild(cancel);
-        actions.appendChild(reset);
-        confirm.appendChild(msg);
-        confirm.appendChild(actions);
-        resetItem.after(confirm);
-        positionPopover();
+        });
       });
       resetItem.classList.add('danger');
 
-      pop.appendChild(divider());
-      const updateTitle = document.createElement('div');
-      updateTitle.className = 'popover-title';
-      updateTitle.textContent = 'Updates';
-      pop.appendChild(updateTitle);
+      addDivider(pop);
+      addTitle(pop, 'Updates');
       const deferredVersion = localStorage.getItem(DEFERRED_UPDATE_KEY);
       const knownAvailable = pendingUpdate?.version || deferredVersion || lastUpdateCheck?.availableVersion;
       const updateItem = addItem(pop, knownAvailable ? `Update available: ${knownAvailable}` : 'Check for updates', async () => {
@@ -2268,9 +2378,13 @@
         }
       });
 
-      const versionItem = document.createElement('div');
-      versionItem.className = 'popover-static';
-      versionItem.textContent = 'Version ...';
+      const quitItem = addItem(pop, 'Quit KanTrack', () => {
+        const tauri = window.__TAURI__;
+        if (tauri?.core?.invoke) tauri.core.invoke('quit_app').catch(() => {});
+      });
+      quitItem.classList.add('danger');
+
+      const versionItem = el('div', 'popover-static', 'Version ...');
       pop.appendChild(versionItem);
       appVersion().then(version => { versionItem.textContent = `Version ${version || 'unknown'}`; });
     });
@@ -2278,10 +2392,7 @@
 
   function openFilters() {
     showPopover(els.filterBtn, pop => {
-      const t = document.createElement('div');
-      t.className = 'popover-title';
-      t.textContent = 'Sort';
-      pop.appendChild(t);
+      addTitle(pop, 'Sort');
       const prioritySort = ui.sortMode === 'priority-low'
         ? 'low'
         : ui.sortMode === 'priority-high' || ui.sortMode === 'priority'
@@ -2299,35 +2410,20 @@
         render();
         closePopover();
       });
-      if (prioritySort) {
-        priorityItem.classList.add('is-active');
-        const c = document.createElement('span');
-        c.className = 'check';
-        c.textContent = '✓';
-        priorityItem.appendChild(c);
-      }
+      setItemActive(priorityItem, prioritySort);
 
       const dueItem = addItem(pop, 'Due date', () => {
         ui.sortMode = ui.sortMode === 'due' ? null : 'due';
         render();
         closePopover();
       });
-      if (ui.sortMode === 'due') {
-        dueItem.classList.add('is-active');
-        const c = document.createElement('span');
-        c.className = 'check';
-        c.textContent = '✓';
-        dueItem.appendChild(c);
-      }
+      setItemActive(dueItem, ui.sortMode === 'due');
 
       const allTags = new Set();
       state.tasks.forEach(t => (t.tags || []).forEach(tag => allTags.add(tag)));
       if (allTags.size > 0) {
-        pop.appendChild(divider());
-        const tt = document.createElement('div');
-        tt.className = 'popover-title';
-        tt.textContent = 'Filter by tag';
-        pop.appendChild(tt);
+        addDivider(pop);
+        addTitle(pop, 'Filter by tag');
         [...allTags].sort().forEach(tag => {
           const item = addItem(pop, '#' + tag, () => {
             if (ui.activeTagFilters.has(tag)) ui.activeTagFilters.delete(tag);
@@ -2335,22 +2431,15 @@
             render();
             openFilters(); // refresh popover
           });
-          if (ui.activeTagFilters.has(tag)) {
-            item.classList.add('is-active');
-            const c = document.createElement('span');
-            c.className = 'check';
-            c.textContent = '✓';
-            item.appendChild(c);
-          }
+          setItemActive(item, ui.activeTagFilters.has(tag));
         });
       }
 
-      if (ui.sortMode || ui.activePrioFilter || Object.keys(ui.lanePrioritySorts).length > 0 || ui.activeTagFilters.size > 0) {
-        pop.appendChild(divider());
+      if (ui.sortMode || ui.activePrioFilter || ui.activeTagFilters.size > 0) {
+        addDivider(pop);
         addItem(pop, '✕  Clear all filters', () => {
           ui.sortMode = null;
           ui.activePrioFilter = null;
-          ui.lanePrioritySorts = {};
           ui.activeTagFilters.clear();
           render();
           closePopover();
@@ -2403,10 +2492,20 @@
     return dismissAppIfPossible();
   }
 
-  els.settingsBtn.addEventListener('click', e => { e.stopPropagation(); if (ui.openPopover) closePopover(); else openSettings(); });
-  els.infoBtn.addEventListener('click', e => { e.stopPropagation(); if (ui.openPopover) closePopover(); else openInfo(); });
-  els.filterBtn.addEventListener('click', e => { e.stopPropagation(); if (ui.openPopover) closePopover(); else openFilters(); });
+  function toggleToolbarPopover(anchorEl, openFn) {
+    if (ui.openPopover && ui.openPopoverAnchor === anchorEl) closePopover();
+    else openFn();
+  }
+
+  els.settingsBtn.addEventListener('click', e => { e.stopPropagation(); toggleToolbarPopover(els.settingsBtn, openSettings); });
+  els.infoBtn.addEventListener('click', e => { e.stopPropagation(); toggleToolbarPopover(els.infoBtn, openInfo); });
+  els.filterBtn.addEventListener('click', e => { e.stopPropagation(); toggleToolbarPopover(els.filterBtn, openFilters); });
   els.addLaneBtn.addEventListener('click', e => { e.stopPropagation(); if (ui.openPopover) closePopover(); addLane(); });
+  els.topbar?.addEventListener('mousedown', e => {
+    if (e.target.closest('.brand, .search-wrap, .topbar-actions, button, input, textarea, select, a')) return;
+    ui.pendingClick = null;
+    clearKeyboardFocus();
+  });
 
   els.searchInput.addEventListener('input', () => {
     ui.searchQuery = els.searchInput.value.trim();
@@ -2437,9 +2536,35 @@
   // ============================================================
   // CLICK-VS-DRAG GUARD (the headline fix)
   // ============================================================
+  function laneFocusTarget(e) {
+    if (e.target.closest(
+      '.task, .add-task-cta, .lane-menu-btn, .popover, button, input, textarea, select, a, ' +
+      '.task-prio, .task-actions, .task-tag, .task-tag-more, .task-due, .task-done-btn, ' +
+      '.task-detail, [contenteditable="true"]'
+    )) return null;
+
+    const lane = e.target.closest('.lane');
+    if (!lane) return null;
+
+    const laneBody = e.target.closest('.lane-body');
+    if (laneBody) return lane.dataset.lane;
+
+    const laneHeader = e.target.closest('.lane-header');
+    if (laneHeader && !e.target.closest('.lane-title, .lane-title-wrap')) {
+      return lane.dataset.lane;
+    }
+
+    return null;
+  }
+
   els.board.addEventListener('mousedown', e => {
     const taskEl = e.target.closest('.task');
-    if (!taskEl) { ui.pendingClick = null; return; }
+    if (!taskEl) {
+      ui.pendingClick = null;
+      const laneId = laneFocusTarget(e);
+      if (laneId) focusLane(laneId);
+      return;
+    }
     selectTask(taskEl.dataset.id, { focus: false });
 
     if (isPriorityEdgeEvent(e, taskEl)) {
@@ -2926,8 +3051,9 @@
   // KEYBOARD
   // ============================================================
   window.addEventListener('resize', () => {
-    rememberWindowWidth();
-    if (ui.openPopover) positionPopover();
+    markWindowResizing();
+    scheduleWindowWidthPersistence();
+    if (ui.openPopover) schedulePopoverPosition();
   });
 
   function currentLaneContext() {
@@ -2937,6 +3063,12 @@
   function addTaskInCurrentContext() {
     const laneId = currentLaneContext();
     if (laneId) addTaskInLane(laneId);
+  }
+
+  function isDeleteTaskShortcut(e) {
+    const isForwardDelete = e.key === 'Delete' || e.code === 'Delete';
+    const isCommandBackspace = e.metaKey && (e.key === 'Backspace' || e.code === 'Backspace');
+    return isForwardDelete || isCommandBackspace;
   }
 
   function selectTaskByVerticalDelta(delta) {
@@ -2985,14 +3117,21 @@
       return true;
     }
 
-    const nearest = nearestVisibleTaskId(nextLane.id);
-    if (nearest) {
-      selectTask(nearest, { focus: true, fallbackLaneId: nextLane.id });
-      return true;
-    }
-
     focusLane(nextLane.id);
     return true;
+  }
+
+  let mainWindowReadyMarked = false;
+
+  function markMainWindowReady() {
+    if (mainWindowReadyMarked) return;
+    const invoke = window.__TAURI__?.core?.invoke;
+    if (!invoke) return;
+
+    mainWindowReadyMarked = true;
+    invoke('mark_main_window_ready').catch(() => {
+      mainWindowReadyMarked = false;
+    });
   }
 
   document.addEventListener('keydown', e => {
@@ -3031,15 +3170,17 @@
 
     if (isEditing) return;
 
-    if ((e.key === 'a' || e.key === 'A' || e.key === '+') && !e.ctrlKey && !e.metaKey) {
-      e.preventDefault();
-      addTaskInCurrentContext();
+    if ((e.key === 'z' || e.key === 'Z') && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+      if (undoLastAction()) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
       return;
     }
 
-    if ((e.key === 'l' || e.key === 'L') && e.metaKey && !e.ctrlKey) {
+    if ((e.key === 'a' || e.key === 'A' || e.key === '+') && !e.ctrlKey && !e.metaKey) {
       e.preventDefault();
-      addLane();
+      addTaskInCurrentContext();
       return;
     }
 
@@ -3058,8 +3199,9 @@
       return;
     }
 
-    if (e.key === 'Delete' && selectedId) {
+    if (isDeleteTaskShortcut(e) && selectedId) {
       e.preventDefault();
+      e.stopPropagation();
       deleteTask(selectedId);
       return;
     }
@@ -3071,6 +3213,8 @@
   syncAutosizeMenu();
   isLaunchAtLoginEnabled().then(syncLaunchAtLoginMenu);
   render();
+  markMainWindowReady();
+  showAfterUpdateRestartIfNeeded();
   if (!hadStoredBoard && localStorage.getItem(ONBOARDING_SEEN_KEY) !== 'true') {
     setTimeout(showOnboarding, 350);
   }

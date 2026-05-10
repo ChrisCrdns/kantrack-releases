@@ -2,6 +2,8 @@
 
 :root {
   color-scheme: light;
+  --settings-window-backing: #f5f7fb;
+  background: var(--settings-window-backing);
 }
 
 html,
@@ -13,7 +15,7 @@ body {
   color: #17202c;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(245, 247, 251, 0.94)),
-    #f5f7fb;
+    var(--settings-window-backing);
   overflow: hidden;
 }
 
@@ -27,6 +29,7 @@ body {
   flex-direction: column;
   gap: 18px;
   height: 100%;
+  background-color: var(--settings-window-backing);
 }
 
 .settings-header {

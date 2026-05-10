@@ -6,13 +6,17 @@ use std::{
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    ActivationPolicy, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Size, State,
-    WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window, Wry,
+    utils::config::Color, ActivationPolicy, LogicalSize, Manager, PhysicalPosition, PhysicalSize,
+    Size, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window, Wry,
 };
 use tauri_plugin_autostart::ManagerExt;
 
+const MAIN_WINDOW_BACKGROUND: Color = Color(247, 249, 252, 255);
+
 static AUTOSIZE_MENU_ENABLED: AtomicBool = AtomicBool::new(true);
 static STARTUP_MENU_ENABLED: AtomicBool = AtomicBool::new(false);
+static MAIN_WINDOW_READY: AtomicBool = AtomicBool::new(false);
+static MAIN_WINDOW_SHOW_PENDING: AtomicBool = AtomicBool::new(false);
 
 struct StartupMenuItem(CheckMenuItem<Wry>);
 struct AutosizeMenuItem(CheckMenuItem<Wry>);
@@ -29,6 +33,9 @@ pub fn run() {
         .setup(|app| {
             app.set_activation_policy(ActivationPolicy::Accessory);
             app.set_dock_visibility(false);
+            if let Some(window) = app.get_webview_window("main") {
+                apply_main_window_background(&window);
+            }
 
             {
                 use tauri_plugin_global_shortcut::{
@@ -196,6 +203,16 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            if startup_enabled {
+                if let Some(window) = app.get_webview_window("main") {
+                    let startup_window = window.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(650));
+                        show_centered_window(&startup_window);
+                    });
+                }
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -214,6 +231,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             hide_main_window,
+            show_main_window,
+            quit_app,
+            mark_main_window_ready,
             update_main_window_layout,
             sync_startup_menu,
             sync_autosize_menu
@@ -227,6 +247,23 @@ fn hide_main_window(app: tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
+}
+
+#[tauri::command]
+fn show_main_window(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        show_centered_window(&window);
+    }
+}
+
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
+#[tauri::command]
+fn mark_main_window_ready() {
+    MAIN_WINDOW_READY.store(true, Ordering::SeqCst);
 }
 
 #[derive(serde::Deserialize)]
@@ -329,12 +366,43 @@ fn toggle_centered_window(window: &WebviewWindow) {
         return;
     }
 
+    show_centered_window(window);
+}
+
+fn show_centered_window(window: &WebviewWindow) {
+    if !MAIN_WINDOW_READY.load(Ordering::SeqCst) {
+        if MAIN_WINDOW_SHOW_PENDING.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let window = window.clone();
+        std::thread::spawn(move || {
+            for _ in 0..80 {
+                if MAIN_WINDOW_READY.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            MAIN_WINDOW_SHOW_PENDING.store(false, Ordering::SeqCst);
+            show_centered_window_now(&window);
+        });
+        return;
+    }
+
+    show_centered_window_now(window);
+}
+
+fn show_centered_window_now(window: &WebviewWindow) {
+    apply_main_window_background(window);
     let _ = window.eval("window.kantrackPrepareForShow?.()");
-    std::thread::sleep(Duration::from_millis(90));
     position_window_top_center(window);
     let _ = window.show();
     let _ = window.set_focus();
     let _ = window.eval("window.kantrackRestoreSelection?.()");
+}
+
+fn apply_main_window_background(window: &WebviewWindow) {
+    let _ = window.set_background_color(Some(MAIN_WINDOW_BACKGROUND));
 }
 
 fn position_window_top_center(window: &WebviewWindow) {

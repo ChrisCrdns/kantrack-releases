@@ -23,10 +23,10 @@ dist-ssr
 *.sln
 *.sw?
 release/
+app-store/
 src-tauri/target/
 *.dmg
 *.zip
 *.tar.gz
 *.sig
 *.app
-

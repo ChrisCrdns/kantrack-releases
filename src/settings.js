@@ -1,5 +1,6 @@
 (() => {
   const AUTO_UPDATE_KEY = 'kantrack_auto_update';
+  const UPDATE_RESTART_SHOW_KEY = 'kantrack_show_after_update_restart';
   const autoUpdate = localStorage.getItem(AUTO_UPDATE_KEY) !== 'false';
   const params = new URLSearchParams(window.location.search);
 
@@ -91,6 +92,7 @@
         onEvent: createProgressChannel(),
       });
       setStatus('Update installed. Relaunching...');
+      localStorage.setItem(UPDATE_RESTART_SHOW_KEY, 'true');
       await tauri.core.invoke('plugin:process|restart');
     } catch (error) {
       const message = typeof error === 'string' ? error : error?.message;

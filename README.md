@@ -25,14 +25,13 @@ The app favors native macOS utility behavior over a heavy desktop-window workflo
 | Show / hide KanTrack | `⌥K` |
 | Search | `/` |
 | New task | `A` or `+` |
-| Add lane | `⌘L` |
 | Open / edit selected task | `Enter` |
 | Complete selected task | `Space` |
 | Navigate tasks and lanes | `↑` `↓` `←` `→` |
 | Move selected task between lanes | `⌘←` `⌘→` |
 | Raise / lower priority | `⌘↑` `⌘↓` |
-| Delete selected task | `Delete` |
-| Add line break while editing | `⇧↵` |
+| Delete selected task | `Delete` or `⌘⌫` |
+| Undo delete | `⌘Z` |
 
 ## Onboarding
 
@@ -84,6 +83,16 @@ npm run publish:release
 The update endpoint is configured for:
 
 [github.com/ChrisCrdns/kantrack-releases/releases](https://github.com/ChrisCrdns/kantrack-releases/releases)
+
+## App Store Variant
+
+Generate a separate source copy without the Tauri updater or GitHub update UI:
+
+```bash
+npm run prepare:app-store
+```
+
+The generated copy is written to `app-store/KanTrack/` and is ignored by git.
 
 ## Project Structure
 

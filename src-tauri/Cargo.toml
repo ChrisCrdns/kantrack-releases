@@ -1,6 +1,6 @@
 [package]
 name = "kantrack"
-version = "1.0.56"
+version = "1.0.85"
 description = "Minimal macOS menu bar task board"
 authors = ["ChrisCrdns"]
 edition = "2021"
@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["macos-private-api", "tray-icon", "image-png"] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
