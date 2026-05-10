@@ -22,3 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+release/
+src-tauri/target/
+*.dmg
+*.zip
+*.tar.gz
+*.sig
+*.app
+
