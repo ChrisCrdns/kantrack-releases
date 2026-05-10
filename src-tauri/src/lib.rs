@@ -1,5 +1,5 @@
 use std::{
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
@@ -11,7 +11,6 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt;
 
-static WINDOW_ANIMATION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static AUTOSIZE_MENU_ENABLED: AtomicBool = AtomicBool::new(true);
 static STARTUP_MENU_ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -88,7 +87,7 @@ pub fn run() {
 
             // Build tray menu
             let show_hide =
-                MenuItem::with_id(app, "show_hide", "Show / Hide Board", true, None::<&str>)?;
+                MenuItem::with_id(app, "show_hide", "Show / Hide Board", true, Some("Alt+K"))?;
             let startup_enabled = app.autolaunch().is_enabled().unwrap_or(false);
             let toggle_startup = CheckMenuItem::with_id(
                 app,
@@ -236,7 +235,6 @@ struct MainWindowLayout {
     height: Option<f64>,
     min_width: f64,
     width: Option<f64>,
-    animate: Option<bool>,
 }
 
 #[tauri::command]
@@ -274,12 +272,8 @@ fn update_main_window_layout(app: tauri::AppHandle, layout: MainWindowLayout) {
         .unwrap_or(current_height);
 
     if (target_width - current_width).abs() > 1.0 || (target_height - current_height).abs() > 1.0 {
-        if layout.animate.unwrap_or(true) {
-            animate_main_window_size(window, target_width, target_height);
-        } else {
-            let _ = window.set_size(Size::Logical(LogicalSize::new(target_width, target_height)));
-            position_window_top_center(&window);
-        }
+        let _ = window.set_size(Size::Logical(LogicalSize::new(target_width, target_height)));
+        position_window_top_center(&window);
     }
 }
 
@@ -293,42 +287,6 @@ fn sync_autosize_menu(enabled: bool, item: State<'_, AutosizeMenuItem>) {
 fn sync_startup_menu(enabled: bool, item: State<'_, StartupMenuItem>) {
     STARTUP_MENU_ENABLED.store(enabled, Ordering::SeqCst);
     let _ = item.0.set_checked(enabled);
-}
-
-fn animate_main_window_size(window: WebviewWindow, target_width: f64, target_height: f64) {
-    let generation = WINDOW_ANIMATION_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let monitor = match window.current_monitor().ok().flatten() {
-        Some(monitor) => monitor,
-        None => return,
-    };
-    let scale = monitor.scale_factor();
-    let current_size = window.outer_size().unwrap_or(PhysicalSize::new(560, 430));
-    let start_width = current_size.width as f64 / scale;
-    let start_height = current_size.height as f64 / scale;
-    let width_delta = target_width - start_width;
-    let height_delta = target_height - start_height;
-
-    if width_delta.abs().max(height_delta.abs()) < 12.0 {
-        let _ = window.set_size(Size::Logical(LogicalSize::new(target_width, target_height)));
-        position_window_top_center(&window);
-        return;
-    }
-
-    std::thread::spawn(move || {
-        let steps = 9;
-        for step in 1..=steps {
-            if WINDOW_ANIMATION_GENERATION.load(Ordering::SeqCst) != generation {
-                return;
-            }
-            let t = step as f64 / steps as f64;
-            let eased = 1.0 - (1.0 - t).powi(3);
-            let width = start_width + width_delta * eased;
-            let height = start_height + height_delta * eased;
-            let _ = window.set_size(Size::Logical(LogicalSize::new(width, height)));
-            position_window_top_center(&window);
-            std::thread::sleep(Duration::from_millis(14));
-        }
-    });
 }
 
 fn open_settings_window(app: &tauri::AppHandle, check_updates: bool) {

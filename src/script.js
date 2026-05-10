@@ -11,6 +11,7 @@
   const LAST_UPDATE_CHECK_KEY = 'kantrack_last_update_check';
   const FILTERS_KEY = 'kantrack_filters_v1';
   const AUTO_MOVE_COMPLETED_KEY = 'kantrack_auto_move_completed_v1';
+  const ONBOARDING_SEEN_KEY = 'kantrack_onboarding_seen_v1';
 
   let pendingUpdate = null;
   let lastUpdateCheck = readJson(LAST_UPDATE_CHECK_KEY, null);
@@ -141,7 +142,7 @@
   const MAX_INLINE_TAGS = 2;
   const MIN_WINDOW_WIDTH = 560;
   const MIN_WINDOW_HEIGHT = 200;
-  const MAX_WINDOW_HEIGHT = 760;
+  const MAX_WINDOW_HEIGHT = 820;
 
   // Click-vs-drag tuning
   const CLICK_MAX_MOVEMENT = 5;   // px
@@ -292,6 +293,11 @@
     };
   }
 
+  const hadStoredBoard = (() => {
+    try { return Boolean(localStorage.getItem(STORAGE_KEY)); }
+    catch (error) { return true; }
+  })();
+
   let state = Storage.load() || createDefaultState();
   const savedFilters = readJson(FILTERS_KEY, {});
   let autoMoveCompleted = readJson(AUTO_MOVE_COMPLETED_KEY, { enabled: false, laneId: null });
@@ -318,7 +324,10 @@
     autosize: localStorage.getItem(AUTOSIZE_KEY) !== 'false',
     lastWindowWidth: Number(localStorage.getItem(WINDOW_WIDTH_KEY)) || null,
     autosizeTimer: null,
-    autosizeFrame: null
+    autosizeFrame: null,
+    layoutInFlight: false,
+    pendingLayout: null,
+    lastLayoutSignature: ''
   };
 
   function persist() { Storage.save(state); }
@@ -328,6 +337,12 @@
       enabled: Boolean(autoMoveCompleted.enabled && autoMoveCompleted.laneId),
       laneId: autoMoveCompleted.laneId || null
     });
+  }
+
+  function loadAutoMoveCompleted() {
+    autoMoveCompleted = readJson(AUTO_MOVE_COMPLETED_KEY, { enabled: false, laneId: null }) || { enabled: false, laneId: null };
+    sanitizeAutoMoveCompleted();
+    return autoMoveCompleted;
   }
 
   function sanitizeAutoMoveCompleted() {
@@ -373,6 +388,7 @@
     if (els.searchWrap) {
       els.searchWrap.classList.remove('has-text', 'is-open');
     }
+    sanitizeAutoMoveCompleted();
     resetFilters();
     renderAndPersist();
   }
@@ -454,14 +470,26 @@
       boardPadding + (topbar?.offsetHeight || 0) + (filterStrip?.offsetHeight || 0) + gaps + 22;
     const baseHeight = Math.ceil(chrome + lanesHeight);
     const popoverHeight = openPopoverRequiredHeight();
-    return Math.max(MIN_WINDOW_HEIGHT, Math.min(MAX_WINDOW_HEIGHT, Math.max(baseHeight, popoverHeight)));
+    const overlayHeight = overlayRequiredHeight();
+    return Math.max(MIN_WINDOW_HEIGHT, Math.min(MAX_WINDOW_HEIGHT, Math.max(baseHeight, popoverHeight, overlayHeight)));
   }
 
   function openPopoverRequiredHeight() {
     if (!ui.openPopover) return 0;
     const rect = ui.openPopover.getBoundingClientRect();
-    const naturalHeight = Math.min(330, ui.openPopover.scrollHeight || rect.height);
+    const naturalHeight = ui.openPopover.scrollHeight || rect.height;
     return Math.ceil(rect.top + naturalHeight + 14);
+  }
+
+  function overlayRequiredHeight() {
+    const modal = document.querySelector('.onboarding-modal:not([hidden]), .update-modal:not([hidden])');
+    if (!modal) return 0;
+    const card = modal.querySelector('.onboarding-card, .update-card');
+    const modalStyle = getComputedStyle(modal);
+    const padding =
+      parseFloat(modalStyle.paddingTop || '0') + parseFloat(modalStyle.paddingBottom || '0');
+    const cardHeight = card ? Math.max(card.scrollHeight, card.getBoundingClientRect().height) : modal.scrollHeight;
+    return Math.ceil(cardHeight + padding + 8);
   }
 
   function currentWindowLayout(options = {}) {
@@ -470,21 +498,42 @@
     return {
       minWidth,
       width: preferredWidth ? Math.max(minWidth, preferredWidth) : null,
-      height: ui.autosize ? desiredWindowHeight() : null,
-      animate: options.animate !== false
+      height: ui.autosize ? desiredWindowHeight() : null
     };
+  }
+
+  function layoutSignature(layout) {
+    return [
+      Math.round(layout.minWidth || 0),
+      layout.width === null ? 'auto' : Math.round(layout.width || 0),
+      layout.height === null ? 'auto' : Math.round(layout.height || 0)
+    ].join(':');
   }
 
   async function applyWindowLayout(options = {}) {
     const tauri = window.__TAURI__;
     if (!tauri?.core?.invoke) return;
-    try { await tauri.core.invoke('update_main_window_layout', { layout: currentWindowLayout(options) }); }
-    catch (error) {}
+    const layout = currentWindowLayout(options);
+    const signature = layoutSignature(layout);
+    if (signature === ui.lastLayoutSignature && !options.force) return;
+    ui.pendingLayout = { layout, signature };
+    if (ui.layoutInFlight) return;
+
+    ui.layoutInFlight = true;
+    while (ui.pendingLayout) {
+      const next = ui.pendingLayout;
+      ui.pendingLayout = null;
+      try {
+        await tauri.core.invoke('update_main_window_layout', { layout: next.layout });
+        ui.lastLayoutSignature = next.signature;
+      } catch (error) {}
+    }
+    ui.layoutInFlight = false;
   }
 
   function syncWindowLayout() {
     clearTimeout(ui.autosizeTimer);
-    ui.autosizeTimer = setTimeout(() => applyWindowLayout({ animate: true }), 60);
+    ui.autosizeTimer = setTimeout(() => applyWindowLayout(), 90);
   }
 
   function syncWindowLayoutSoon() {
@@ -499,8 +548,7 @@
     clearTimeout(ui.autosizeTimer);
     if (ui.autosizeFrame) cancelAnimationFrame(ui.autosizeFrame);
     ui.autosizeFrame = null;
-    applyWindowLayout({ animate: false });
-    requestAnimationFrame(() => applyWindowLayout({ animate: false }));
+    applyWindowLayout({ force: true });
   };
 
   window.kantrackRestoreSelection = () => {
@@ -514,6 +562,10 @@
   window.kantrackSetLaunchAtLogin = enabled => {
     syncLaunchAtLoginMenu(Boolean(enabled));
   };
+
+  window.addEventListener('storage', event => {
+    if (event.key === AUTO_MOVE_COMPLETED_KEY) loadAutoMoveCompleted();
+  });
 
   function insertTaskLineBreak() {
     const selection = window.getSelection();
@@ -785,6 +837,7 @@
   }
 
   function completedDestinationLane() {
+    loadAutoMoveCompleted();
     if (!autoMoveCompleted.enabled || !autoMoveCompleted.laneId) return null;
     const lane = state.lanes.find(item => item.id === autoMoveCompleted.laneId);
     if (!lane) {
@@ -1444,6 +1497,28 @@
     return true;
   }
 
+  function adjustSelectedTaskPriority(delta) {
+    const selectedId = restoreSelection({ focus: false });
+    const task = selectedId ? state.tasks.find(item => item.id === selectedId) : null;
+    if (!task) return false;
+
+    const currentIndex = PRIO_CYCLE.indexOf(task.prio);
+    const safeIndex = currentIndex < 0 ? 0 : currentIndex;
+    const nextIndex = Math.min(PRIO_CYCLE.length - 1, Math.max(0, safeIndex + delta));
+    const nextPrio = PRIO_CYCLE[nextIndex];
+    if (task.prio === nextPrio) {
+      selectTask(task.id, { focus: true });
+      return false;
+    }
+
+    task.prio = nextPrio;
+    ui.focusedTaskId = task.id;
+    ui.activeLaneId = task.laneId;
+    renderAndPersist(new Set([task.id]));
+    requestAnimationFrame(() => selectTask(task.id, { focus: true }));
+    return true;
+  }
+
   function addTaskInLane(laneId) {
     const lane = state.lanes.find(l => l.id === laneId);
     if (!lane) return;
@@ -1861,9 +1936,85 @@
     item.appendChild(c);
   }
 
+  function fallbackCompletedLaneId() {
+    return state.lanes[state.lanes.length - 1]?.id || null;
+  }
+
+  function setAutoMoveCompleted(enabled, laneId = autoMoveCompleted.laneId) {
+    autoMoveCompleted = {
+      enabled: Boolean(enabled),
+      laneId: enabled ? (laneId || fallbackCompletedLaneId()) : null
+    };
+    sanitizeAutoMoveCompleted();
+  }
+
+  function showOnboarding() {
+    closePopover();
+    const existing = document.querySelector('.onboarding-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.className = 'onboarding-modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'onboarding-title');
+    modal.innerHTML = `
+      <div class="onboarding-card">
+        <div class="onboarding-mark">◆</div>
+        <h2 id="onboarding-title">Welcome to KanTrack</h2>
+        <p class="onboarding-copy">A fast menu-bar board for capturing tasks, moving work, and staying keyboard-first.</p>
+        <div class="onboarding-grid">
+          <div><kbd>⌥K</kbd><span>Show or hide KanTrack from anywhere.</span></div>
+          <div><kbd>A</kbd><span>Add a task in the current lane. You can also click a lane’s + button.</span></div>
+          <div><kbd>↑ ↓</kbd><span>Move through visible tasks. Use <kbd>← →</kbd> to move between lanes.</span></div>
+          <div><kbd>⌘← ⌘→</kbd><span>Move the selected task to the previous or next lane.</span></div>
+          <div><kbd>⌘↑ ⌘↓</kbd><span>Raise or lower task priority. You can also click a task’s left edge.</span></div>
+          <div><kbd>/</kbd><span>Search tasks, notes, and tags instantly. Press Esc to clear, then blur.</span></div>
+        </div>
+        <p class="onboarding-copy">Drag tasks between lanes, drag lane headers to reorder, use Space to complete, and configure completed-task auto-move from the gear menu.</p>
+        <div class="onboarding-actions">
+          <button type="button" class="onboarding-button secondary">Later</button>
+          <button type="button" class="onboarding-button primary">Get Started</button>
+        </div>
+      </div>
+    `;
+
+    const close = () => {
+      localStorage.setItem(ONBOARDING_SEEN_KEY, 'true');
+      modal.remove();
+      restoreSelection({ focus: true });
+    };
+
+    modal.querySelector('.secondary').addEventListener('click', close);
+    modal.querySelector('.primary').addEventListener('click', close);
+    modal.addEventListener('mousedown', event => {
+      if (event.target === modal) close();
+    });
+    modal.addEventListener('keydown', event => {
+      if (event.key === 'Escape' || event.key === 'Enter') {
+        event.preventDefault();
+        event.stopPropagation();
+        close();
+      }
+    });
+
+    els.board.appendChild(modal);
+    requestAnimationFrame(() => {
+      modal.querySelector('.primary')?.focus();
+      syncWindowLayoutSoon();
+    });
+    syncWindowLayoutSoon();
+  }
+
   function openInfo() {
     showPopover(els.infoBtn, pop => {
       pop.classList.add('info-popover');
+      addItem(pop, 'Start walkthrough', () => {
+        closePopover();
+        showOnboarding();
+      });
+      pop.appendChild(divider());
+
       const t = document.createElement('div');
       t.className = 'popover-title';
       t.textContent = 'Shortcuts';
@@ -1872,14 +2023,17 @@
       const shortcuts = document.createElement('div');
       shortcuts.className = 'popover-shortcuts';
       const sc = [
-        ['Search', '⌘K'],
-        ['New task', '⌘N'],
+        ['Show / hide', '⌥K'],
+        ['Search', '/'],
+        ['New task', 'A or +'],
         ['Add lane', '⌘L'],
-        ['Open details', 'Enter'],
-        ['Line break', '⇧↵'],
+        ['Open task', 'Enter'],
+        ['Complete task', 'Space'],
+        ['Navigate', '↑ ↓ ← →'],
+        ['Move task', '⌘← ⌘→'],
+        ['Priority', '⌘↑ ⌘↓'],
         ['Delete task', 'Delete'],
-        ['Navigate tasks', '↑ ↓ ← →'],
-        ['Close / Cancel', 'Esc']
+        ['Line break', '⇧↵']
       ];
       sc.forEach(([label, key]) => {
         const row = document.createElement('div');
@@ -1919,6 +2073,44 @@
   function openSettings() {
     showPopover(els.settingsBtn, pop => {
       pop.classList.add('settings-popover');
+      const exportBoard = () => {
+        const json = JSON.stringify(state, null, 2);
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `kantrack-${Date.now()}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+        closePopover();
+      };
+      const importBoard = () => {
+        const inp = document.createElement('input');
+        inp.type = 'file';
+        inp.accept = 'application/json';
+        inp.onchange = () => {
+          const f = inp.files[0];
+          if (!f) return;
+          const r = new FileReader();
+          r.onload = () => {
+            try {
+              const parsed = JSON.parse(r.result);
+              const validated = Storage.validate(parsed);
+              if (validated) {
+                state = validated;
+                ui.expandedTaskId = null;
+                sanitizeAutoMoveCompleted();
+                renderAndPersist();
+              }
+              else showToast('Invalid import file.');
+            } catch (e) { showToast('Could not parse import file.'); }
+          };
+          r.readAsText(f);
+        };
+        inp.click();
+        closePopover();
+      };
+
       const t = document.createElement('div');
       t.className = 'popover-title';
       t.textContent = 'General';
@@ -1942,43 +2134,75 @@
       isLaunchAtLoginEnabled().then(enabled => appendCheck(launchItem, enabled));
 
       pop.appendChild(divider());
+      const taskTitle = document.createElement('div');
+      taskTitle.className = 'popover-title';
+      taskTitle.textContent = 'Tasks';
+      pop.appendChild(taskTitle);
+
+      loadAutoMoveCompleted();
+      const completedRow = document.createElement('div');
+      completedRow.className = 'popover-inline-row completed-move-row';
+      const moveCompletedItem = document.createElement('button');
+      moveCompletedItem.type = 'button';
+      moveCompletedItem.className = 'popover-inline-toggle';
+      const moveCompletedLabel = document.createElement('span');
+      moveCompletedLabel.textContent = 'Move completed';
+      moveCompletedItem.appendChild(moveCompletedLabel);
+      const destinationSelect = document.createElement('select');
+      destinationSelect.className = 'popover-select';
+
+      const syncMoveCompletedRow = () => {
+        appendCheck(moveCompletedItem, autoMoveCompleted.enabled);
+        destinationSelect.disabled = !autoMoveCompleted.enabled || state.lanes.length === 0;
+        if (autoMoveCompleted.laneId) destinationSelect.value = autoMoveCompleted.laneId;
+      };
+
+      moveCompletedItem.addEventListener('click', () => {
+        const nextEnabled = !autoMoveCompleted.enabled;
+        setAutoMoveCompleted(nextEnabled);
+        syncMoveCompletedRow();
+      });
+
+      state.lanes.forEach(lane => {
+        const option = document.createElement('option');
+        option.value = lane.id;
+        option.textContent = lane.name;
+        destinationSelect.appendChild(option);
+      });
+      destinationSelect.value = autoMoveCompleted.laneId || fallbackCompletedLaneId() || '';
+      destinationSelect.disabled = !autoMoveCompleted.enabled || state.lanes.length === 0;
+      destinationSelect.addEventListener('mousedown', e => e.stopPropagation());
+      destinationSelect.addEventListener('click', e => e.stopPropagation());
+      destinationSelect.addEventListener('change', () => {
+        setAutoMoveCompleted(true, destinationSelect.value);
+        syncMoveCompletedRow();
+        positionPopover();
+      });
+      syncMoveCompletedRow();
+      completedRow.appendChild(moveCompletedItem);
+      completedRow.appendChild(destinationSelect);
+      pop.appendChild(completedRow);
+
+      pop.appendChild(divider());
       const dataTitle = document.createElement('div');
       dataTitle.className = 'popover-title';
       dataTitle.textContent = 'Data';
       pop.appendChild(dataTitle);
-      addItem(pop, 'Export JSON', () => {
-        const json = JSON.stringify(state, null, 2);
-        const blob = new Blob([json], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `kantrack-${Date.now()}.json`;
-        a.click();
-        URL.revokeObjectURL(url);
-        closePopover();
-      });
-
-      addItem(pop, 'Import JSON', () => {
-        const inp = document.createElement('input');
-        inp.type = 'file';
-        inp.accept = 'application/json';
-        inp.onchange = () => {
-          const f = inp.files[0];
-          if (!f) return;
-          const r = new FileReader();
-          r.onload = () => {
-            try {
-              const parsed = JSON.parse(r.result);
-              const validated = Storage.validate(parsed);
-              if (validated) { state = validated; ui.expandedTaskId = null; renderAndPersist(); }
-              else showToast('Invalid import file.');
-            } catch (e) { showToast('Could not parse import file.'); }
-          };
-          r.readAsText(f);
-        };
-        inp.click();
-        closePopover();
-      });
+      const dataRow = document.createElement('div');
+      dataRow.className = 'popover-inline-row data-actions-row';
+      const exportButton = document.createElement('button');
+      exportButton.type = 'button';
+      exportButton.className = 'popover-inline-action';
+      exportButton.textContent = 'Export JSON';
+      exportButton.addEventListener('click', exportBoard);
+      const importButton = document.createElement('button');
+      importButton.type = 'button';
+      importButton.className = 'popover-inline-action';
+      importButton.textContent = 'Import JSON';
+      importButton.addEventListener('click', importBoard);
+      dataRow.appendChild(exportButton);
+      dataRow.appendChild(importButton);
+      pop.appendChild(dataRow);
 
       pop.appendChild(divider());
       const resetItem = addItem(pop, 'Reset board', () => {
@@ -2796,6 +3020,8 @@
       e.preventDefault();
       if (e.metaKey && e.key === 'ArrowLeft') { moveSelectedTaskByLane(-1); return; }
       if (e.metaKey && e.key === 'ArrowRight') { moveSelectedTaskByLane(1); return; }
+      if (e.metaKey && e.key === 'ArrowUp') { adjustSelectedTaskPriority(1); return; }
+      if (e.metaKey && e.key === 'ArrowDown') { adjustSelectedTaskPriority(-1); return; }
       if (e.key === 'ArrowUp') { selectTaskByVerticalDelta(-1); return; }
       if (e.key === 'ArrowDown') { selectTaskByVerticalDelta(1); return; }
       if (e.key === 'ArrowLeft') { selectLaneByDelta(-1); return; }
@@ -2845,4 +3071,7 @@
   syncAutosizeMenu();
   isLaunchAtLoginEnabled().then(syncLaunchAtLoginMenu);
   render();
+  if (!hadStoredBoard && localStorage.getItem(ONBOARDING_SEEN_KEY) !== 'true') {
+    setTimeout(showOnboarding, 350);
+  }
 })();

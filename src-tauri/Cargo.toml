@@ -1,8 +1,8 @@
 [package]
 name = "kantrack"
-version = "1.0.52"
-description = "KanTrack Alpha V1"
-authors = ["you"]
+version = "1.0.56"
+description = "Minimal macOS menu bar task board"
+authors = ["ChrisCrdns"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

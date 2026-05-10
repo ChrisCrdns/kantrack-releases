@@ -2009,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "kantrack"
-version = "1.0.52"
+version = "1.0.56"
 dependencies = [
  "serde",
  "serde_json",
