@@ -1,0 +1,11 @@
+{
+  "version": "1.0.16",
+  "notes": "KanTrack 1.0.16",
+  "pub_date": "2026-05-09T16:22:00.900Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSeEVyN2E0VWtlZm5xWTF6akZqc0loeUZmOWMwdlFDeGhFNURXbENYWHhaWUpCdlp4QkQ3L09YaXVkY1pqTmNuV1JzSTkrVGlXamQvNGFGejg3T2xiTWJyVS9CL0dUSEFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc4MzQzNzIwCWZpbGU6S2FuVHJhY2suYXBwLnRhci5negpzbFpwS2NNcG9lUE1uUzZoaExPZWtwd1BPazRVRmtLU2dIQlJmSTZzRms4OEc4QmlOcDBLSy9jSWczVFU2ck1mbW5aYXh6Q2oxZ2luTHpJdCsrZkRDQT09Cg==",
+      "url": "https://github.com/ChrisCrdns/kantrack-releases/releases/download/v1.0.16/KanTrack.app.tar.gz"
+    }
+  }
+}

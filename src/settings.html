@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
+  <title>KanTrack Settings</title>
+  <link rel="stylesheet" href="./settings.css">
+</head>
+<body>
+  <main class="settings-shell">
+    <header class="settings-header">
+      <div>
+        <p class="eyebrow">KanTrack</p>
+        <h1>Settings</h1>
+        <p class="version-line">Version <span id="app-version">...</span></p>
+      </div>
+      <span class="mark">◆</span>
+    </header>
+
+    <section class="settings-section">
+      <div class="section-copy">
+        <h2>General</h2>
+        <p>Control how KanTrack starts.</p>
+      </div>
+
+      <div class="settings-stack">
+        <label class="setting-toggle">
+          <input type="checkbox" id="launch-login">
+          <span>
+            <strong>Launch at login</strong>
+            <small>Start KanTrack automatically when you sign in.</small>
+          </span>
+        </label>
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <div class="section-copy">
+        <h2>Tasks</h2>
+        <p>Choose what happens when work is completed.</p>
+      </div>
+
+      <div class="settings-stack">
+        <label class="setting-toggle setting-toggle-wide">
+          <input type="checkbox" id="auto-move-completed">
+          <span>
+            <strong>Move completed tasks</strong>
+            <small>Send completed tasks to a selected lane.</small>
+          </span>
+        </label>
+
+        <label class="setting-select-row" for="auto-move-lane">
+          <span>Destination lane</span>
+          <select id="auto-move-lane"></select>
+        </label>
+      </div>
+    </section>
+
+    <section class="settings-section muted">
+      <div class="section-copy">
+        <h2>Updates</h2>
+        <p>Keep KanTrack current from GitHub.</p>
+      </div>
+      <div class="update-panel">
+        <label class="setting-toggle">
+          <input type="checkbox" id="auto-update">
+          <span>
+            <strong>Automatically check for updates</strong>
+            <small>Show Update Now / Later when a new version is available.</small>
+          </span>
+        </label>
+
+        <div class="update-actions">
+          <button id="check-updates" type="button">Check for Updates</button>
+          <button id="install-update" type="button" class="secondary" hidden>Install Update</button>
+          <p id="update-status">No update check yet.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="./settings.js"></script>
+</body>
+</html>

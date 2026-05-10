@@ -1,0 +1,19 @@
+{
+  "name": "kantrack",
+  "private": true,
+  "version": "1.0.52",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "package:alpha": "./scripts/package-alpha-v1.sh",
+    "package:release": "./scripts/package-alpha-v1.sh",
+    "publish:release": "./scripts/publish-github-release.sh"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  },
+  "dependencies": {
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1"
+  }
+}
